@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getAuth, initializeAuth } from "firebase/auth";
+import { getAuth, initializeAuth, type Auth } from "firebase/auth";
 import { getFirestore, serverTimestamp } from "firebase/firestore";
 
 // Firebase config loaded from environment variables
@@ -14,51 +14,61 @@ export const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 
-export const auth = getAuth(app);
-
-/**
- * Enable persistent auth using @react-native-async-storage/async-storage.
- * Call this once at app startup (for example in `app/_layout.tsx`).
- */
-export async function enableAuthPersistence() {
-  try {
-    // @ts-ignore (optional dependency)
-    const asyncPkg = await import("@react-native-async-storage/async-storage");
-    // Build a small AsyncStorage-backed persistence object as a safe fallback.
-    // This avoids relying on the internal 'firebase/auth/react-native' path which
-    // may not be exported by all SDK versions.
-    const AsyncStorage = (asyncPkg as any).default || (asyncPkg as any);
-    if (AsyncStorage) {
-      const simplePersistence = {
-        // Firebase only needs an object with async get/set/remove methods
-        async get(key: string) {
-          return await AsyncStorage.getItem(key);
-        },
-        async set(key: string, value: string) {
-          await AsyncStorage.setItem(key, value);
-        },
-        async remove(key: string) {
-          await AsyncStorage.removeItem(key);
-        },
-      } as any;
-
-      try {
-        return initializeAuth(app, { persistence: simplePersistence });
-      } catch (e) {
-        // Some firebase versions expect a specific persistence wrapper; if initializeAuth
-        // rejects, fall back to memory persistence.
-        console.debug("initializeAuth with simplePersistence failed", e);
-      }
-    }
-  } catch (err) {
-    // async-storage not available or failed to initialize — fall back to memory persistence
-    console.warn(
-      "AsyncStorage persistence unavailable, auth will use memory persistence",
-      err,
-    );
+function createAuth(): Auth {
+  // Only initialize native AsyncStorage persistence when running in React Native
+  // (detect via navigator.product === 'ReactNative'). For web or Node, fall back to getAuth.
+  if (
+    typeof navigator === "undefined" ||
+    (navigator as any).product !== "ReactNative"
+  ) {
+    return getAuth(app);
   }
-  return auth;
+
+  try {
+    // Dynamically require AsyncStorage only on React Native environments.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const AsyncStorage =
+      require("@react-native-async-storage/async-storage").default;
+
+    class AsyncStoragePersistence {
+      static type = "LOCAL";
+      readonly type = "LOCAL";
+
+      async _isAvailable() {
+        return true;
+      }
+
+      async _set(key: string, value: unknown) {
+        await AsyncStorage.setItem(key, JSON.stringify(value));
+      }
+
+      async _get<T>(key: string) {
+        const value = await AsyncStorage.getItem(key);
+        if (value == null) return null;
+
+        try {
+          return JSON.parse(value) as T;
+        } catch {
+          return value as T;
+        }
+      }
+
+      async _remove(key: string) {
+        await AsyncStorage.removeItem(key);
+      }
+
+      _addListener() {}
+
+      _removeListener() {}
+    }
+
+    return initializeAuth(app, { persistence: AsyncStoragePersistence as any });
+  } catch {
+    return getAuth(app);
+  }
 }
+
+export const auth = createAuth();
 export const db = getFirestore(app);
 export { serverTimestamp };
 

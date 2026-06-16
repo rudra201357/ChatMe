@@ -14,6 +14,7 @@ import {
   View,
 } from "react-native";
 
+import { IconSymbol } from "@/components/ui/icon-symbol";
 import { auth, db } from "@/firebase/config";
 import {
   createUserWithEmailAndPassword,
@@ -21,7 +22,6 @@ import {
   User as FirebaseUser,
   onAuthStateChanged,
   signInWithEmailAndPassword,
-  signOut,
 } from "firebase/auth";
 import {
   collection,
@@ -44,6 +44,27 @@ type Profile = {
 };
 
 const normalizeMobile = (value: string) => value.replace(/[^\d]/g, "");
+
+const getOtherMobile = (
+  chat: DocumentData,
+  otherId?: string,
+  ownMobile?: string,
+) => {
+  if (!otherId) return undefined;
+
+  const mappedMobile = chat.participantMobilesById?.[otherId];
+  if (mappedMobile) return mappedMobile;
+
+  return (chat.participantMobiles || []).find(
+    (mobile: string) => mobile && mobile !== ownMobile,
+  );
+};
+
+const getUnreadCount = (chat: DocumentData, userId?: string) => {
+  if (!userId) return 0;
+  const count = chat.unreadCounts?.[userId];
+  return typeof count === "number" ? count : 0;
+};
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -71,9 +92,15 @@ export default function HomeScreen() {
       return;
     }
 
-    return onSnapshot(doc(db, "users", user.uid), (snap) => {
-      setProfile(snap.exists() ? (snap.data() as Profile) : null);
-    });
+    return onSnapshot(
+      doc(db, "users", user.uid),
+      (snap) => {
+        setProfile(snap.exists() ? (snap.data() as Profile) : null);
+      },
+      () => {
+        setProfile(null);
+      },
+    );
   }, [user]);
 
   useEffect(() => {
@@ -87,17 +114,24 @@ export default function HomeScreen() {
       where("participants", "array-contains", user.uid),
     );
 
-    return onSnapshot(q, (snap) => {
-      const data: DocumentData[] = [];
-      snap.forEach((chatDoc) =>
-        data.push({ id: chatDoc.id, ...chatDoc.data() }),
-      );
-      setChats(
-        data.sort(
-          (a, b) => (b.updatedAt?.seconds || 0) - (a.updatedAt?.seconds || 0),
-        ),
-      );
-    });
+    return onSnapshot(
+      q,
+      (snap) => {
+        const data: DocumentData[] = [];
+        snap.forEach((chatDoc) =>
+          data.push({ id: chatDoc.id, ...chatDoc.data() }),
+        );
+        setChats(
+          data.sort(
+            (a, b) =>
+              (b.updatedAt?.seconds || 0) - (a.updatedAt?.seconds || 0),
+          ),
+        );
+      },
+      () => {
+        setChats([]);
+      },
+    );
   }, [user]);
 
   const validateSignup = () => {
@@ -165,20 +199,12 @@ export default function HomeScreen() {
     setLoading(true);
     try {
       await signInWithEmailAndPassword(auth, email.trim(), password);
+      setPassword("");
+      router.replace("/");
     } catch (e) {
       Alert.alert("Login error", e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-      setPassword("");
-      setNewChatWith("");
-    } catch (e) {
-      Alert.alert("Sign out error", String(e));
     }
   };
 
@@ -213,6 +239,12 @@ export default function HomeScreen() {
           participantMobiles: [profile?.mobileNumber, receiverMobile].filter(
             Boolean,
           ),
+          participantMobilesById: {
+            ...(profile?.mobileNumber
+              ? { [user.uid]: profile.mobileNumber }
+              : {}),
+            [receiver.uid]: receiverMobile,
+          },
           participantNames: {
             [user.uid]: profile?.name || user.email || "Me",
             [receiver.uid]: receiver.name || receiverMobile,
@@ -239,13 +271,10 @@ export default function HomeScreen() {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         <ScrollView contentContainerStyle={styles.authWrap}>
-          <View style={styles.heroBadge}>
-            <Text style={styles.heroBadgeText}>ChatMe</Text>
-          </View>
-          <Text style={styles.heroTitle}>Private chats by mobile ID</Text>
+          <Text style={styles.heroTitle}>Vibe</Text>
           <Text style={styles.heroSub}>
             Sign in with email and password. Your mobile number becomes your
-            unique ChatMe ID.
+            unique Vibe ID.
           </Text>
 
           <View style={styles.panel}>
@@ -332,7 +361,7 @@ export default function HomeScreen() {
                 <ActivityIndicator color="#fff" />
               ) : (
                 <Text style={styles.primaryButtonText}>
-                  {isSignup ? "Create account" : "Enter ChatMe"}
+                  {isSignup ? "Create account" : "Enter Vibe"}
                 </Text>
               )}
             </Pressable>
@@ -352,8 +381,15 @@ export default function HomeScreen() {
             ID: {profile?.mobileNumber || "loading..."}
           </Text>
         </View>
-        <Pressable onPress={handleLogout} style={styles.ghostButton}>
-          <Text style={styles.ghostText}>Sign out</Text>
+        <Pressable
+          onPress={() => router.push("/profile")}
+          style={styles.profileButton}
+        >
+          <IconSymbol
+            name="person.crop.circle.fill"
+            size={30}
+            color="#0f172a"
+          />
         </Pressable>
       </View>
 
@@ -361,7 +397,7 @@ export default function HomeScreen() {
         <Text style={styles.boxTitle}>Start a chat</Text>
         <View style={styles.row}>
           <TextInput
-            placeholder="Receiver mobile number"
+            placeholder="Receiver unique ID (mobile number)"
             value={newChatWith}
             onChangeText={setNewChatWith}
             style={[styles.input, styles.flexInput]}
@@ -387,12 +423,18 @@ export default function HomeScreen() {
             (id: string) => id !== user.uid,
           );
           const otherName = item.participantNames?.[otherId] || "Chat";
-          const mobiles = (item.participantMobiles || []).join(" / ");
+          const receiverMobile = getOtherMobile(
+            item,
+            otherId,
+            profile?.mobileNumber,
+          );
+          const unreadCount = getUnreadCount(item, user.uid);
+          const hasUnread = unreadCount > 0;
 
           return (
             <Pressable
               onPress={() => router.push(`/chat/${item.id}`)}
-              style={styles.chatCard}
+              style={[styles.chatCard, hasUnread && styles.chatCardUnread]}
             >
               <View style={styles.avatar}>
                 <Text style={styles.avatarText}>
@@ -400,10 +442,30 @@ export default function HomeScreen() {
                 </Text>
               </View>
               <View style={styles.chatInfo}>
-                <Text style={styles.chatTitle}>{otherName}</Text>
-                <Text style={styles.chatMeta}>{mobiles || item.id}</Text>
+                <Text
+                  style={[styles.chatTitle, hasUnread && styles.unreadText]}
+                >
+                  {otherName}
+                </Text>
+                <Text
+                  numberOfLines={1}
+                  style={[styles.chatMeta, hasUnread && styles.unreadMeta]}
+                >
+                  {item.lastMessage || receiverMobile || item.id}
+                </Text>
               </View>
-              <Text style={styles.chevron}>›</Text>
+              {hasUnread ? (
+                <View style={styles.unreadWrap}>
+                  <Text style={styles.newMessageText}>New</Text>
+                  <View style={styles.unreadBadge}>
+                    <Text style={styles.unreadBadgeText}>
+                      {unreadCount > 99 ? "99+" : unreadCount}
+                    </Text>
+                  </View>
+                </View>
+              ) : (
+                <Text style={styles.chevron}>{">"}</Text>
+              )}
             </Pressable>
           );
         }}
@@ -437,7 +499,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#0f172a",
     borderRadius: 999,
     paddingHorizontal: 14,
-    paddingVertical: 7,
+    paddingVertical: 9,
     marginBottom: 16,
   },
   heroBadgeText: {
@@ -545,17 +607,15 @@ const styles = StyleSheet.create({
     color: "#526071",
     marginTop: 4,
   },
-  ghostButton: {
-    borderWidth: 1,
-    borderColor: "#cbd5e1",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+  profileButton: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    alignItems: "center",
+    justifyContent: "center",
     backgroundColor: "#fff",
-  },
-  ghostText: {
-    color: "#0f172a",
-    fontWeight: "800",
+    borderWidth: 1,
+    borderColor: "#dbe4ee",
   },
   startChatBox: {
     backgroundColor: "#0f172a",
@@ -605,6 +665,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#dde6f0",
   },
+  chatCardUnread: {
+    borderColor: "#86efac",
+    backgroundColor: "#f6fff9",
+  },
   avatar: {
     width: 44,
     height: 44,
@@ -633,6 +697,37 @@ const styles = StyleSheet.create({
   chevron: {
     color: "#94a3b8",
     fontSize: 28,
+  },
+  unreadText: {
+    color: "#052e16",
+  },
+  unreadMeta: {
+    color: "#166534",
+    fontWeight: "800",
+  },
+  unreadWrap: {
+    alignItems: "center",
+    gap: 4,
+  },
+  newMessageText: {
+    color: "#16a34a",
+    fontSize: 11,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  unreadBadge: {
+    minWidth: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#22c55e",
+    paddingHorizontal: 7,
+  },
+  unreadBadgeText: {
+    color: "#052e16",
+    fontSize: 12,
+    fontWeight: "900",
   },
   emptyState: {
     alignItems: "center",

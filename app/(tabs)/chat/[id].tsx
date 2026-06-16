@@ -1,27 +1,128 @@
 import { auth, db, serverTimestamp } from "@/firebase/config";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useIsFocused } from "@react-navigation/native";
+import { User as FirebaseUser, onAuthStateChanged } from "firebase/auth";
 import {
-    addDoc,
-    collection,
-    doc,
-    getDocs,
-    onSnapshot,
-    orderBy,
-    query,
-    updateDoc,
-    where,
+  collection,
+  doc,
+  increment,
+  onSnapshot,
+  orderBy,
+  query,
+  writeBatch,
 } from "firebase/firestore";
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    FlatList,
-    KeyboardAvoidingView,
-    Platform,
-    Pressable,
-    StyleSheet,
-    Text,
-    TextInput,
-    View,
+  AppState,
+  BackHandler,
+  FlatList,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from "react-native";
+
+type MessageRow = {
+  type: "message";
+  key: string;
+  message: any;
+};
+
+type DateRow = {
+  type: "date";
+  key: string;
+  label: string;
+};
+
+type ChatRow = MessageRow | DateRow;
+
+const MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+const padTime = (value: number) => String(value).padStart(2, "0");
+
+const getMessageDate = (value: any) => {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value.toDate === "function") return value.toDate() as Date;
+  if (typeof value.seconds === "number") {
+    return new Date(value.seconds * 1000);
+  }
+  return null;
+};
+
+const getDateKey = (date: Date) =>
+  `${date.getFullYear()}-${padTime(date.getMonth() + 1)}-${padTime(
+    date.getDate(),
+  )}`;
+
+const startOfDay = (date: Date) =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+
+const formatDateLabel = (date: Date) => {
+  const today = new Date();
+  const dayDiff = Math.round(
+    (startOfDay(today) - startOfDay(date)) / (24 * 60 * 60 * 1000),
+  );
+
+  if (dayDiff === 0) return "Today";
+  if (dayDiff === 1) return "Yesterday";
+
+  return `${padTime(date.getDate())} ${
+    MONTHS[date.getMonth()]
+  } ${date.getFullYear()}`;
+};
+
+const formatMessageTime = (value: any) => {
+  const date = getMessageDate(value);
+  if (!date) return "--:--";
+  return `${padTime(date.getHours())}:${padTime(date.getMinutes())}`;
+};
+
+const buildChatRows = (messageList: any[]): ChatRow[] => {
+  const rows: ChatRow[] = [];
+  let previousDateKey: string | null = null;
+
+  messageList.forEach((message) => {
+    const messageDate = getMessageDate(message.createdAt);
+
+    if (messageDate) {
+      const dateKey = getDateKey(messageDate);
+      if (dateKey !== previousDateKey) {
+        rows.push({
+          type: "date",
+          key: `date-${dateKey}`,
+          label: formatDateLabel(messageDate),
+        });
+        previousDateKey = dateKey;
+      }
+    }
+
+    rows.push({
+      type: "message",
+      key: message.id,
+      message,
+    });
+  });
+
+  return rows;
+};
 
 export default function ChatScreen() {
   const params = useLocalSearchParams();
@@ -29,81 +130,194 @@ export default function ChatScreen() {
   const [messages, setMessages] = useState<any[]>([]);
   const [text, setText] = useState("");
   const [chat, setChat] = useState<any>(null);
-  const user = auth.currentUser;
+  const [user, setUser] = useState<FirebaseUser | null>(auth.currentUser);
   const router = useRouter();
+  const isFocused = useIsFocused();
+  const flatListRef = useRef<any>(null);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const [isAppActive, setIsAppActive] = useState(
+    AppState.currentState === "active",
+  );
+  const chatRows = useMemo(() => buildChatRows(messages), [messages]);
+  const goHome = useCallback(() => {
+    router.replace("/");
+  }, [router]);
 
   useEffect(() => {
-    if (!chatId) return;
+    if (!isFocused) return;
 
-    return onSnapshot(doc(db, "chats", chatId), (snap) => {
-      setChat(snap.exists() ? snap.data() : null);
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      goHome();
+      return true;
     });
-  }, [chatId]);
+
+    return () => {
+      sub.remove();
+    };
+  }, [goHome, isFocused]);
 
   useEffect(() => {
-    if (!chatId) return;
+    return onAuthStateChanged(auth, (nextUser) => {
+      setUser(nextUser);
+
+      if (!nextUser) {
+        setChat(null);
+        setMessages([]);
+        setText("");
+        router.replace("/");
+      }
+    });
+  }, [router]);
+
+  useEffect(() => {
+    if (!chatId || !user) return;
+
+    return onSnapshot(
+      doc(db, "chats", chatId),
+      (snap) => {
+        setChat(snap.exists() ? snap.data() : null);
+      },
+      () => {
+        setChat(null);
+      },
+    );
+  }, [chatId, user]);
+
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+
+    const showSub = Keyboard.addListener("keyboardDidShow", () =>
+      setKeyboardOpen(true),
+    );
+    const hideSub = Keyboard.addListener("keyboardDidHide", () =>
+      setKeyboardOpen(false),
+    );
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chatId || !user) return;
 
     const q = query(
       collection(db, `chats/${chatId}/messages`),
       orderBy("createdAt"),
     );
 
-    return onSnapshot(q, (snap) => {
-      const nextMessages: any[] = [];
-      snap.forEach((messageDoc) => {
-        nextMessages.push({ id: messageDoc.id, ...messageDoc.data() });
-      });
-      setMessages(nextMessages);
-    });
-  }, [chatId]);
+    return onSnapshot(
+      q,
+      (snap) => {
+        const nextMessages: any[] = [];
+        snap.forEach((messageDoc) => {
+          nextMessages.push({ id: messageDoc.id, ...messageDoc.data() });
+        });
+        setMessages(nextMessages);
+      },
+      () => {
+        setMessages([]);
+      },
+    );
+  }, [chatId, user]);
 
   useEffect(() => {
-    if (!chatId || !user) return;
+    const sub = AppState.addEventListener?.("change", (state) => {
+      setIsAppActive(state === "active");
+    });
 
-    (async () => {
-      const q = query(
-        collection(db, `chats/${chatId}/messages`),
-        where("read", "==", false),
-        where("senderId", "!=", user.uid),
-      );
-      const snap = await getDocs(q);
-      const updates: Promise<void>[] = [];
-      snap.forEach((messageDoc) => {
-        updates.push(
-          updateDoc(doc(db, `chats/${chatId}/messages/${messageDoc.id}`), {
-            read: true,
-          }),
-        );
+    return () => {
+      sub?.remove?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chatId || !user || !isAppActive || !isFocused) return;
+
+    const unreadIncoming = messages.filter(
+      (message) =>
+        message.id && message.senderId !== user.uid && message.read !== true,
+    );
+    if (unreadIncoming.length === 0) return;
+
+    const batch = writeBatch(db);
+    unreadIncoming.forEach((message) => {
+      batch.update(doc(db, "chats", chatId, "messages", message.id), {
+        read: true,
       });
-      await Promise.all(updates);
-    })();
-  }, [chatId, user]);
+    });
+    batch.update(doc(db, "chats", chatId), {
+      [`unreadCounts.${user.uid}`]: 0,
+    });
+
+    batch.commit().catch(() => null);
+  }, [chatId, isAppActive, isFocused, messages, user]);
 
   const handleSend = async () => {
     const message = text.trim();
     if (!message || !chatId || !user) return;
 
     setText("");
-    await addDoc(collection(db, `chats/${chatId}/messages`), {
+    const batch = writeBatch(db);
+    const chatRef = doc(db, "chats", chatId);
+    const messageRef = doc(collection(db, "chats", chatId, "messages"));
+
+    batch.set(messageRef, {
       text: message,
       senderId: user.uid,
       createdAt: serverTimestamp(),
       read: false,
     });
-    await updateDoc(doc(db, "chats", chatId), { updatedAt: serverTimestamp() });
+
+    const unreadUpdates = (chat?.participants || [])
+      .filter((id: string) => id !== user.uid)
+      .reduce(
+        (updates: Record<string, ReturnType<typeof increment>>, id: string) => {
+          updates[`unreadCounts.${id}`] = increment(1);
+          return updates;
+        },
+        {},
+      );
+
+    batch.update(chatRef, {
+      ...unreadUpdates,
+      lastMessage: message,
+      lastMessageSenderId: user.uid,
+      updatedAt: serverTimestamp(),
+    });
+    await batch.commit();
   };
 
   const otherId = (chat?.participants || []).find(
     (id: string) => id !== user?.uid,
   );
   const title = chat?.participantNames?.[otherId] || "Chat";
+  const otherMobileId = (chat?.participantMobiles || [])[
+    (chat?.participants || []).indexOf(otherId)
+  ];
+  const otherMobile =
+    chat?.participantMobilesById?.[otherId] ||
+    otherMobileId ||
+    (chat?.participantMobiles || []).find(Boolean);
+
+  useEffect(() => {
+    // scroll to end whenever messages update
+    try {
+      (flatListRef.current as any)?.scrollToEnd?.({ animated: true });
+    } catch {
+      // ignore
+    }
+  }, [messages]);
 
   return (
     <KeyboardAvoidingView
       style={styles.screen}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
+      keyboardVerticalOffset={0}
     >
       <View style={styles.header}>
+      
         <View style={styles.avatar}>
           <Text style={styles.avatarText}>
             {String(title).charAt(0).toUpperCase()}
@@ -111,27 +325,51 @@ export default function ChatScreen() {
         </View>
         <View style={styles.headerText}>
           <Text style={styles.title}>{title}</Text>
-          <Text style={styles.subtitle}>
-            {(chat?.participantMobiles || []).join(" > ")}
-          </Text>
+          <Text style={styles.subtitle}>{otherMobile || "User"}</Text>
         </View>
       </View>
 
       <FlatList
-        data={messages}
-        keyExtractor={(item) => item.id}
+        ref={flatListRef}
+        data={chatRows}
+        keyExtractor={(item) => item.key}
+        keyboardShouldPersistTaps="handled"
         contentContainerStyle={styles.messageList}
+        onContentSizeChange={() => {
+          try {
+            (flatListRef.current as any)?.scrollToEnd?.({ animated: true });
+          } catch {}
+        }}
         renderItem={({ item }) => {
-          const isMe = item.senderId === user?.uid;
+          if (item.type === "date") {
+            return (
+              <View style={styles.dateDivider}>
+                <Text style={styles.dateDividerText}>{item.label}</Text>
+              </View>
+            );
+          }
+
+          const message = item.message;
+          const isMe = message.senderId === user?.uid;
 
           return (
             <View style={[styles.message, isMe ? styles.me : styles.them]}>
               <Text style={[styles.messageText, isMe && styles.meText]}>
-                {item.text}
+                {message.text}
               </Text>
-              {isMe ? (
-                <Text style={styles.read}>{item.read ? "Seen" : "Sent"}</Text>
-              ) : null}
+              <View style={styles.messageMetaRow}>
+                <Text style={[styles.messageTime, isMe && styles.meTime]}>
+                  {formatMessageTime(message.createdAt)}
+                </Text>
+                {isMe ? (
+                  <View
+                    style={[
+                      styles.statusDot,
+                      message.read ? styles.seenDot : styles.sentDot,
+                    ]}
+                  />
+                ) : null}
+              </View>
             </View>
           );
         }}
@@ -146,7 +384,9 @@ export default function ChatScreen() {
       />
 
       {user ? (
-        <View style={styles.composer}>
+        <View
+          style={[styles.composer, keyboardOpen && styles.composerKeyboardOpen]}
+        >
           <TextInput
             value={text}
             onChangeText={setText}
@@ -181,19 +421,36 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
+    gap: 10,
     paddingHorizontal: 16,
     paddingTop: 30,
     paddingBottom: 10,
     backgroundColor: "#fff",
     borderBottomWidth: 1,
     borderBottomColor: "#dbe4ee",
-    
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#eef4fa",
+    borderWidth: 1,
+    borderColor: "#dbe4ee",
+    marginTop: 10,
+  },
+  backButtonText: {
+    color: "#0f172a",
+    fontSize: 24,
+    fontWeight: "900",
+    lineHeight: 26,
   },
   avatar: {
     width: 46,
     height: 46,
     borderRadius: 23,
+    marginTop: 10, // extra margin to offset from top padding
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#0f172a",
@@ -217,7 +474,21 @@ const styles = StyleSheet.create({
   },
   messageList: {
     padding: 14,
-    paddingBottom: 20,
+    paddingBottom: 18,
+  },
+  dateDivider: {
+    alignItems: "center",
+    marginVertical: 12,
+  },
+  dateDividerText: {
+    color: "#526071",
+    fontSize: 12,
+    fontWeight: "800",
+    backgroundColor: "#dbeafe",
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    overflow: "hidden",
   },
   message: {
     paddingHorizontal: 13,
@@ -244,12 +515,31 @@ const styles = StyleSheet.create({
   meText: {
     color: "#fff",
   },
-  read: {
-    color: "#bfdbfe",
+  messageMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: 6,
+    marginTop: 5,
+  },
+  messageTime: {
+    color: "#64748b",
     fontSize: 11,
     fontWeight: "700",
-    marginTop: 4,
-    textAlign: "right",
+  },
+  meTime: {
+    color: "#dbeafe",
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  sentDot: {
+    backgroundColor: "#f97316",
+  },
+  seenDot: {
+    backgroundColor: "#22c55e",
   },
   composer: {
     flexDirection: "row",
@@ -259,6 +549,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     borderTopWidth: 1,
     borderTopColor: "#dbe4ee",
+  },
+  composerKeyboardOpen: {
+    paddingBottom: 8,
   },
   input: {
     flex: 1,

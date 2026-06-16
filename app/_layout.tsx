@@ -1,7 +1,6 @@
 import { DefaultTheme, ThemeProvider } from "@react-navigation/native";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import React from "react";
 import "react-native-reanimated";
 
 export const unstable_settings = {
@@ -10,20 +9,6 @@ export const unstable_settings = {
 
 // Force light theme for visibility
 export default function RootLayout() {
-  React.useEffect(() => {
-    // enable auth persistence if AsyncStorage is installed
-    (async () => {
-      try {
-        const mod = await import("@/firebase/config");
-        if (mod && typeof mod.enableAuthPersistence === "function") {
-          await mod.enableAuthPersistence();
-        }
-      } catch {
-        // ignore
-      }
-    })();
-  }, []);
-
   return (
     <ThemeProvider value={DefaultTheme}>
       <Stack>
